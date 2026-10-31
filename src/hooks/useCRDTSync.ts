@@ -1,0 +1,327 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import * as Y from 'yjs';
+import {
+  DocumentSnapshot,
+  readDocumentSnapshot,
+  initializeDocument,
+  getMetaMap,
+  getPagesMap,
+  getTextOverlaysMap,
+  getWhiteoutsMap,
+  getRedactionsMap,
+  getSignaturesMap,
+  addTextOverlayCRDT,
+  updateTextOverlayCRDT,
+  removeTextOverlayCRDT,
+  addWhiteoutCRDT,
+  updateWhiteoutCRDT,
+  removeWhiteoutCRDT,
+  addRedactionCRDT,
+  removeRedactionCRDT,
+  addSignatureCRDT,
+  updateSignatureCRDT,
+  removeSignatureCRDT,
+  movePageCRDT,
+  rotatePageCRDT,
+  setPageDeletedCRDT,
+} from '../lib/crdt/schema';
+import { createP2PProvider, P2PProviderHandle } from '../lib/crdt/p2pProvider';
+import { exportSyncFile, importSyncFile, downloadSyncFile } from '../lib/crdt/fileSync';
+import { getOriginalPDF, storeOriginalPDF } from '../lib/crdt/pdfStore';
+import { SyncStatus, TextOverlay, WhiteoutBox, RedactionBox, SignatureBox, PageMetadata } from '../types';
+
+export interface UseCRDTSyncOptions {
+  documentId: string | null;
+  initialPdfBytes?: Uint8Array | null;
+  initialTitle?: string;
+  pageCount?: number;
+}
+
+export function useCRDTSync(options: UseCRDTSyncOptions) {
+  const { documentId, initialPdfBytes, initialTitle, pageCount } = options;
+
+  const [doc, setDoc] = useState<Y.Doc | null>(null);
+  const [snapshot, setSnapshot] = useState<DocumentSnapshot>({
+    meta: { documentId: '', title: '', createdAt: 0 },
+    pages: [],
+    textOverlays: [],
+    whiteouts: [],
+    redactions: [],
+    signatures: [],
+  });
+
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('offline');
+  const [peerCount, setPeerCount] = useState<number>(0);
+  const [rawPdfBytes, setRawPdfBytes] = useState<Uint8Array | null>(initialPdfBytes || null);
+  const [pdfProgress, setPdfProgress] = useState<number | null>(null);
+  const [isLoaded, setIsLoaded] = useState<boolean>(false);
+
+  const providerHandleRef = useRef<P2PProviderHandle | null>(null);
+  const docRef = useRef<Y.Doc | null>(null);
+
+  // Sync ref with state
+  useEffect(() => {
+    docRef.current = doc;
+  }, [doc]);
+
+  // Main lifecycle for joining a document room
+  useEffect(() => {
+    if (!documentId) {
+      setDoc(null);
+      setIsLoaded(false);
+      setSyncStatus('offline');
+      setPeerCount(0);
+      return;
+    }
+
+    let isCancelled = false;
+    const ydoc = new Y.Doc();
+    setDoc(ydoc);
+
+    // Deep observer callback to re-render UI whenever nested maps change
+    const handleDeepChange = () => {
+      if (isCancelled) return;
+      setSnapshot(readDocumentSnapshot(ydoc));
+    };
+
+    const metaMap = getMetaMap(ydoc);
+    const pagesMap = getPagesMap(ydoc);
+    const textOverlaysMap = getTextOverlaysMap(ydoc);
+    const whiteoutsMap = getWhiteoutsMap(ydoc);
+    const redactionsMap = getRedactionsMap(ydoc);
+    const signaturesMap = getSignaturesMap(ydoc);
+
+    metaMap.observeDeep(handleDeepChange);
+    pagesMap.observeDeep(handleDeepChange);
+    textOverlaysMap.observeDeep(handleDeepChange);
+    whiteoutsMap.observeDeep(handleDeepChange);
+    redactionsMap.observeDeep(handleDeepChange);
+    signaturesMap.observeDeep(handleDeepChange);
+
+    // Load or initialize
+    (async () => {
+      try {
+        // 1. Check local PDF bytes
+        const existingPdf = await getOriginalPDF(documentId);
+        if (existingPdf && existingPdf.bytes) {
+          if (!isCancelled) setRawPdfBytes(existingPdf.bytes);
+        } else if (initialPdfBytes) {
+          await storeOriginalPDF(documentId, initialPdfBytes, initialTitle);
+          if (!isCancelled) setRawPdfBytes(initialPdfBytes);
+        }
+
+        // 2. Connect P2P and IndexedDB persistence
+        const handle = await createP2PProvider(documentId, ydoc, {
+          onStatusChange: (status) => {
+            if (!isCancelled) setSyncStatus(status);
+          },
+          onPeersChange: (count) => {
+            if (!isCancelled) setPeerCount(count);
+          },
+          onPdfAvailable: (bytes) => {
+            if (!isCancelled) {
+              setRawPdfBytes(bytes);
+              setPdfProgress(null);
+            }
+          },
+          onPdfProgress: (progress) => {
+            if (!isCancelled) setPdfProgress(progress);
+          },
+        });
+
+        if (isCancelled) {
+          handle.destroy();
+          return;
+        }
+
+        providerHandleRef.current = handle;
+
+        // 3. If doc has no pages yet and pageCount is provided, initialize
+        if (pageCount && pageCount > 0) {
+          initializeDocument(ydoc, documentId, initialTitle || 'Document.pdf', pageCount);
+        }
+
+        // 4. If we still don't have the PDF bytes, request them from peers
+        if (!existingPdf && !initialPdfBytes) {
+          handle.engine.requestPDFFromPeers();
+        }
+
+        if (!isCancelled) {
+          setSnapshot(readDocumentSnapshot(ydoc));
+          setIsLoaded(true);
+        }
+      } catch (err) {
+        console.error('Error initializing CRDT sync:', err);
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+      metaMap.unobserveDeep(handleDeepChange);
+      pagesMap.unobserveDeep(handleDeepChange);
+      textOverlaysMap.unobserveDeep(handleDeepChange);
+      whiteoutsMap.unobserveDeep(handleDeepChange);
+      redactionsMap.unobserveDeep(handleDeepChange);
+      signaturesMap.unobserveDeep(handleDeepChange);
+
+      if (providerHandleRef.current) {
+        providerHandleRef.current.destroy();
+        providerHandleRef.current = null;
+      }
+      ydoc.destroy();
+    };
+  }, [documentId, pageCount]);
+
+  // ================= Mutation Helpers =================
+
+  const addTextOverlay = useCallback(
+    (overlay: Omit<TextOverlay, 'id'> & { id?: string }) => {
+      if (!docRef.current) return '';
+      return addTextOverlayCRDT(docRef.current, overlay);
+    },
+    []
+  );
+
+  const updateTextOverlay = useCallback(
+    (id: string, patch: Partial<TextOverlay>) => {
+      if (!docRef.current) return;
+      updateTextOverlayCRDT(docRef.current, id, patch);
+    },
+    []
+  );
+
+  const removeTextOverlay = useCallback((id: string) => {
+    if (!docRef.current) return;
+    removeTextOverlayCRDT(docRef.current, id);
+  }, []);
+
+  const addWhiteout = useCallback(
+    (box: Omit<WhiteoutBox, 'id'> & { id?: string }) => {
+      if (!docRef.current) return '';
+      return addWhiteoutCRDT(docRef.current, box);
+    },
+    []
+  );
+
+  const updateWhiteout = useCallback(
+    (id: string, patch: Partial<WhiteoutBox>) => {
+      if (!docRef.current) return;
+      updateWhiteoutCRDT(docRef.current, id, patch);
+    },
+    []
+  );
+
+  const removeWhiteout = useCallback((id: string) => {
+    if (!docRef.current) return;
+    removeWhiteoutCRDT(docRef.current, id);
+  }, []);
+
+  const addRedaction = useCallback(
+    (redaction: Omit<RedactionBox, 'id'> & { id?: string }) => {
+      if (!docRef.current) return '';
+      return addRedactionCRDT(docRef.current, redaction);
+    },
+    []
+  );
+
+  const removeRedaction = useCallback((id: string) => {
+    if (!docRef.current) return;
+    removeRedactionCRDT(docRef.current, id);
+  }, []);
+
+  const addSignature = useCallback(
+    (sig: Omit<SignatureBox, 'id'> & { id?: string }) => {
+      if (!docRef.current) return '';
+      return addSignatureCRDT(docRef.current, sig);
+    },
+    []
+  );
+
+  const updateSignature = useCallback(
+    (id: string, patch: Partial<SignatureBox>) => {
+      if (!docRef.current) return;
+      updateSignatureCRDT(docRef.current, id, patch);
+    },
+    []
+  );
+
+  const removeSignature = useCallback((id: string) => {
+    if (!docRef.current) return;
+    removeSignatureCRDT(docRef.current, id);
+  }, []);
+
+  const movePage = useCallback(
+    (pageId: string, prevOrder: string | null, nextOrder: string | null) => {
+      if (!docRef.current) return;
+      movePageCRDT(docRef.current, pageId, prevOrder, nextOrder);
+    },
+    []
+  );
+
+  const rotatePage = useCallback((pageId: string, degreesDelta: number) => {
+    if (!docRef.current) return;
+    rotatePageCRDT(docRef.current, pageId, degreesDelta);
+  }, []);
+
+  const deletePage = useCallback((pageId: string, deleted: boolean) => {
+    if (!docRef.current) return;
+    setPageDeletedCRDT(docRef.current, pageId, deleted);
+  }, []);
+
+  const initDocument = useCallback(
+    (title: string, count: number) => {
+      if (!docRef.current || !documentId) return;
+      initializeDocument(docRef.current, documentId, title, count);
+    },
+    [documentId]
+  );
+
+  const exportSync = useCallback(() => {
+    if (!docRef.current || !documentId) return;
+    const { blob, filename } = exportSyncFile(docRef.current, documentId);
+    downloadSyncFile(blob, filename);
+  }, [documentId]);
+
+  const importSync = useCallback(
+    async (file: File) => {
+      if (!docRef.current || !documentId) return;
+      await importSyncFile(file, docRef.current, documentId);
+    },
+    [documentId]
+  );
+
+  return {
+    doc,
+    documentId,
+    snapshot,
+    pages: snapshot.pages,
+    textOverlays: snapshot.textOverlays,
+    whiteouts: snapshot.whiteouts,
+    redactions: snapshot.redactions,
+    signatures: snapshot.signatures,
+    meta: snapshot.meta,
+    syncStatus,
+    peerCount,
+    rawPdfBytes,
+    pdfProgress,
+    isLoaded,
+    // Mutations
+    addTextOverlay,
+    updateTextOverlay,
+    removeTextOverlay,
+    addWhiteout,
+    updateWhiteout,
+    removeWhiteout,
+    addRedaction,
+    removeRedaction,
+    addSignature,
+    updateSignature,
+    removeSignature,
+    movePage,
+    rotatePage,
+    deletePage,
+    initDocument,
+    exportSync,
+    importSync,
+  };
+}
