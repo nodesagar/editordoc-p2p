@@ -122,15 +122,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <div className="relative flex items-center w-full">
               <input
                 type="text"
-                placeholder="Enter SHA-256 Room ID..."
+                placeholder="Enter Room ID or paste link..."
                 value={joinInput}
                 onChange={(e) => setJoinInput(e.target.value)}
-                className="w-full sm:w-60 bg-white border border-black/15 text-xs rounded-xl px-3 py-2.5 pr-14 focus:outline-none focus:border-[#005db2]"
+                className="w-full sm:w-64 bg-white border border-black/15 text-xs rounded-xl px-3 py-2.5 pr-14 focus:outline-none focus:border-[#005db2]"
               />
               <button
                 type="submit"
                 disabled={!joinInput.trim()}
-                className="absolute right-1 text-xs bg-black/5 hover:bg-[#005db2] hover:text-white disabled:opacity-30 px-2.5 py-1.5 rounded-lg transition-colors font-medium"
+                className="absolute right-1 text-xs bg-black/5 hover:bg-[#005db2] hover:text-white disabled:opacity-30 px-2.5 py-1.5 rounded-lg transition-colors font-medium cursor-pointer"
               >
                 Join
               </button>

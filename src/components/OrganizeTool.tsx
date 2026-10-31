@@ -5,6 +5,7 @@ import { ProcessedDoc } from '../types';
 import { buildConvergedPDF, splitPDF, downloadUint8ArrayAsFile, formatBytes } from '../utils/pdfProcessor';
 import { PageThumbnailGrid } from './PageThumbnailGrid';
 import { useCRDTSync } from '../hooks/useCRDTSync';
+import { SyncWaitingCard } from './SyncWaitingCard';
 
 interface OrganizeToolProps {
   onDocumentProcessed: (doc: ProcessedDoc) => void;
@@ -154,6 +155,19 @@ export const OrganizeTool: React.FC<OrganizeToolProps> = ({
   };
 
   if (!rawPdfBytes) {
+    if (documentId) {
+      return (
+        <SyncWaitingCard
+          documentId={documentId}
+          peerCount={crdt.peerCount}
+          pdfProgress={crdt.pdfProgress}
+          syncStatus={crdt.syncStatus}
+          onRequestPdf={crdt.requestPdfFromPeers}
+          onUploadFile={onUploadFile}
+        />
+      );
+    }
+
     return (
       <div className="max-w-[1000px] mx-auto px-4 py-16 text-center">
         <div className="bg-white rounded-2xl border-2 border-dashed border-black/15 p-12 space-y-4">

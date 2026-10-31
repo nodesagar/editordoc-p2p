@@ -2,13 +2,14 @@ import { get, set, createStore } from 'idb-keyval';
 
 // Separate IndexedDB store for large PDF binary blobs
 const pdfStoreDb = createStore('editordoc_pdf_db', 'original_pdfs');
-const CHUNK_SIZE = 48 * 1024; // 48KB chunks for reliable WebRTC DataChannel transfer
+const CHUNK_SIZE = 32 * 1024; // 32KB chunks for reliable WebRTC DataChannel transfer
 
 export interface ChunkMessage {
   documentId: string;
   chunkIndex: number;
   totalChunks: number;
-  data: ArrayBuffer;
+  data: string | ArrayBuffer | Uint8Array;
+  filename?: string;
 }
 
 export interface TransferProgress {
@@ -16,6 +17,60 @@ export interface TransferProgress {
   receivedChunks: number;
   totalChunks: number;
   percentage: number;
+}
+
+/**
+ * Converts Uint8Array to Base64 string for safe JSON serialization across transports.
+ */
+export function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i += 8192) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, len)) as any);
+  }
+  return btoa(binary);
+}
+
+/**
+ * Converts Base64 string back to Uint8Array.
+ */
+export function base64ToUint8Array(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
+ * Normalizes any incoming data format (Base64 string, Uint8Array, ArrayBuffer, or numeric-keyed JSON object)
+ * into a clean, verified Uint8Array.
+ */
+export function normalizeToUint8Array(data: any): Uint8Array {
+  if (!data) return new Uint8Array(0);
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (typeof data === 'string') {
+    try {
+      return base64ToUint8Array(data);
+    } catch {
+      return new Uint8Array(0);
+    }
+  }
+  if (Array.isArray(data)) return new Uint8Array(data);
+  if (typeof data === 'object') {
+    const keys = Object.keys(data);
+    if (keys.length > 0 && typeof (data as any)[0] === 'number') {
+      const arr = new Uint8Array(keys.length);
+      for (let i = 0; i < keys.length; i++) {
+        arr[i] = (data as any)[i];
+      }
+      return arr;
+    }
+  }
+  return new Uint8Array(0);
 }
 
 /**
@@ -35,15 +90,21 @@ export async function storeOriginalPDF(
   bytes: Uint8Array,
   filename?: string
 ): Promise<void> {
-  await set(
-    documentId,
-    {
-      bytes,
-      filename: filename || 'document.pdf',
-      storedAt: Date.now(),
-    },
-    pdfStoreDb
-  );
+  if (typeof indexedDB === 'undefined') return;
+  try {
+    const cleanId = documentId.trim().toLowerCase();
+    await set(
+      cleanId,
+      {
+        bytes,
+        filename: filename || 'Document.pdf',
+        storedAt: Date.now(),
+      },
+      pdfStoreDb
+    );
+  } catch (err) {
+    console.warn('Failed to store PDF in indexedDB:', err);
+  }
 }
 
 /**
@@ -52,44 +113,60 @@ export async function storeOriginalPDF(
 export async function getOriginalPDF(
   documentId: string
 ): Promise<{ bytes: Uint8Array; filename: string } | null> {
-  const entry = await get<{ bytes: Uint8Array; filename: string }>(
-    documentId,
-    pdfStoreDb
-  );
-  if (!entry || !entry.bytes) return null;
-  return {
-    bytes: new Uint8Array(entry.bytes),
-    filename: entry.filename || 'document.pdf',
-  };
+  if (typeof indexedDB === 'undefined') return null;
+  try {
+    const cleanId = documentId.trim().toLowerCase();
+    const entry = await get<{ bytes: Uint8Array; filename: string }>(
+      cleanId,
+      pdfStoreDb
+    );
+    if (!entry || !entry.bytes) return null;
+    return {
+      bytes: new Uint8Array(entry.bytes),
+      filename: entry.filename || 'Document.pdf',
+    };
+  } catch (err) {
+    console.warn('Failed to read PDF from indexedDB:', err);
+    return null;
+  }
 }
 
 /**
  * Check if the original PDF exists locally.
  */
 export async function hasOriginalPDF(documentId: string): Promise<boolean> {
-  const entry = await get(documentId, pdfStoreDb);
-  return Boolean(entry);
+  if (typeof indexedDB === 'undefined') return false;
+  try {
+    const cleanId = documentId.trim().toLowerCase();
+    const entry = await get(cleanId, pdfStoreDb);
+    return Boolean(entry);
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Chunk a PDF byte buffer into sequential ArrayBuffers for peer transmission.
+ * Chunk a PDF byte buffer into sequential Base64-encoded messages for reliable peer transmission.
  */
 export function chunkPDF(
   documentId: string,
-  bytes: Uint8Array
+  bytes: Uint8Array,
+  filename?: string
 ): ChunkMessage[] {
   const totalChunks = Math.ceil(bytes.byteLength / CHUNK_SIZE);
   const chunks: ChunkMessage[] = [];
+  const cleanId = documentId.trim().toLowerCase();
 
   for (let i = 0; i < totalChunks; i++) {
     const start = i * CHUNK_SIZE;
     const end = Math.min(start + CHUNK_SIZE, bytes.byteLength);
-    const slice = bytes.slice(start, end);
+    const slice = bytes.subarray(start, end);
     chunks.push({
-      documentId,
+      documentId: cleanId,
       chunkIndex: i,
       totalChunks,
-      data: slice.buffer as ArrayBuffer,
+      data: uint8ArrayToBase64(slice),
+      filename,
     });
   }
 
@@ -105,16 +182,16 @@ export class ChunkReassembler {
   public readonly documentId: string;
 
   constructor(documentId: string) {
-    this.documentId = documentId;
+    this.documentId = documentId.trim().toLowerCase();
   }
 
   public addChunk(
     chunkIndex: number,
     totalChunks: number,
-    data: ArrayBuffer
+    data: string | ArrayBuffer | Uint8Array
   ): { isComplete: boolean; progress: number } {
     this.totalChunks = totalChunks;
-    this.chunks.set(chunkIndex, new Uint8Array(data));
+    this.chunks.set(chunkIndex, normalizeToUint8Array(data));
 
     const progress = Math.round((this.chunks.size / totalChunks) * 100);
     const isComplete = this.chunks.size === totalChunks;
@@ -142,12 +219,13 @@ export class ChunkReassembler {
       offset += c.byteLength;
     }
 
-    // Hash verification
+    // Hash verification (case-insensitive)
     const computed = await computeSHA256(fullBuffer);
-    if (computed !== this.documentId) {
+    if (computed.toLowerCase() !== this.documentId.toLowerCase()) {
       throw new Error(`SHA-256 mismatch: expected ${this.documentId}, calculated ${computed}`);
     }
 
     return fullBuffer;
   }
 }
+

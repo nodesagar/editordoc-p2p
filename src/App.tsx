@@ -46,6 +46,28 @@ export default function App() {
     }
   }, [crdt.rawPdfBytes, rawPdfBytes]);
 
+  // Sync document title from CRDT metadata if available
+  useEffect(() => {
+    if (crdt.meta.title && crdt.meta.title !== 'Document.pdf' && (fileName === 'Document.pdf' || !fileName)) {
+      setFileName(crdt.meta.title);
+    }
+  }, [crdt.meta.title, fileName]);
+
+  // Keep browser URL synchronized with active documentId
+  useEffect(() => {
+    if (documentId) {
+      try {
+        const url = new URL(window.location.href);
+        if (url.searchParams.get('doc') !== documentId) {
+          url.searchParams.set('doc', documentId);
+          window.history.replaceState(null, '', url.toString());
+        }
+      } catch (e) {
+        console.warn('Could not update URL query param:', e);
+      }
+    }
+  }, [documentId]);
+
   // Load recent docs history from IndexedDB on startup
   useEffect(() => {
     get<ProcessedDoc[]>('editordoc_recent_docs').then((val) => {
@@ -96,7 +118,7 @@ export default function App() {
       setFileName('Confidential_Agreement.pdf');
       setRawPdfBytes(sampleBytes.slice());
       setPageCount(2);
-      setDocumentId(docId);
+      setDocumentId(docId.toLowerCase());
       setActiveTool('edit');
     } catch (err) {
       console.error('Failed to load demo document:', err);
@@ -112,16 +134,36 @@ export default function App() {
 
       setFileName(file.name);
       setRawPdfBytes(bytes.slice());
-      setDocumentId(docId);
+      setDocumentId(docId.toLowerCase());
       setActiveTool('edit');
     } catch (err) {
       console.error('Failed to upload PDF:', err);
     }
   };
 
-  const handleJoinRoomId = async (roomId: string) => {
-    setDocumentId(roomId);
-    const existing = await getOriginalPDF(roomId);
+  const handleJoinRoomId = async (input: string) => {
+    if (!input || !input.trim()) return;
+    let roomId = input.trim().replace(/^["']|["']$/g, '').trim();
+
+    // If a full URL was pasted (e.g. https://.../?doc=8a3f...), extract the doc parameter
+    if (roomId.includes('doc=')) {
+      try {
+        const urlStr = roomId.startsWith('http://') || roomId.startsWith('https://')
+          ? roomId
+          : 'https://' + roomId.replace(/^\/+/, '');
+        const parsed = new URL(urlStr);
+        const param = parsed.searchParams.get('doc');
+        if (param) roomId = param;
+      } catch {
+        const match = roomId.match(/doc=([a-fA-F0-9]+)/);
+        if (match) roomId = match[1];
+      }
+    }
+
+    const cleanId = roomId.split('?')[0].split('#')[0].trim().toLowerCase();
+    setDocumentId(cleanId);
+
+    const existing = await getOriginalPDF(cleanId);
     if (existing && existing.bytes) {
       setRawPdfBytes(existing.bytes);
       setFileName(existing.filename || 'Document.pdf');

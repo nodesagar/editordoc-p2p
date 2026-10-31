@@ -1,5 +1,14 @@
 import * as Y from 'yjs';
-import { ChunkMessage, ChunkReassembler, chunkPDF, getOriginalPDF, storeOriginalPDF } from './pdfStore';
+import {
+  ChunkMessage,
+  ChunkReassembler,
+  chunkPDF,
+  getOriginalPDF,
+  storeOriginalPDF,
+  hasOriginalPDF,
+  uint8ArrayToBase64,
+  normalizeToUint8Array,
+} from './pdfStore';
 
 export interface PeerMessage {
   type: 'state-vector' | 'state-update' | 'request-pdf' | 'pdf-chunk';
@@ -22,34 +31,32 @@ export interface DocSyncOptions {
   doc: Y.Doc;
   documentId: string;
   transports: SyncTransport[];
+  getLocalPdfBytes?: () => Uint8Array | null;
   onPeersChange?: (peersCount: number) => void;
-  onPdfAvailable?: (bytes: Uint8Array) => void;
+  onPdfAvailable?: (bytes: Uint8Array, filename?: string) => void;
   onPdfProgress?: (progress: number) => void;
 }
 
 /**
  * DocSyncEngine orchestrates CRDT state synchronization across transports.
- * Implements the mandatory state-vector handshake on peer join and live update relaying.
+ * Implements the mandatory state-vector handshake on peer join, automatic PDF
+ * acquisition from peers, and live update relaying.
  */
 export class DocSyncEngine {
   private doc: Y.Doc;
   public readonly documentId: string;
   private transports: SyncTransport[];
+  private options: DocSyncOptions;
   private activePeers: Set<string> = new Set();
   private pdfReassembler: ChunkReassembler | null = null;
   private destroyed = false;
-
-  private onPeersChange?: (peersCount: number) => void;
-  private onPdfAvailable?: (bytes: Uint8Array) => void;
-  private onPdfProgress?: (progress: number) => void;
+  private pdfPollTimer: any = null;
 
   constructor(options: DocSyncOptions) {
     this.doc = options.doc;
-    this.documentId = options.documentId;
+    this.documentId = options.documentId.trim().toLowerCase();
     this.transports = options.transports;
-    this.onPeersChange = options.onPeersChange;
-    this.onPdfAvailable = options.onPdfAvailable;
-    this.onPdfProgress = options.onPdfProgress;
+    this.options = options;
 
     this.init();
   }
@@ -65,6 +72,40 @@ export class DocSyncEngine {
       transport.onMessage((peerId, message) => this.handlePeerMessage(transport, peerId, message));
       transport.connect(this.documentId);
     }
+
+    // 3. Start PDF polling to guarantee document retrieval when peers connect
+    this.startPdfPolling();
+  }
+
+  private startPdfPolling() {
+    this.stopPdfPolling();
+    this.pdfPollTimer = setInterval(async () => {
+      if (this.destroyed) {
+        this.stopPdfPolling();
+        return;
+      }
+      const hasLocal = Boolean(this.options.getLocalPdfBytes?.());
+      if (hasLocal) {
+        this.stopPdfPolling();
+        return;
+      }
+      const inDb = await hasOriginalPDF(this.documentId);
+      if (inDb) {
+        this.stopPdfPolling();
+        return;
+      }
+      // If we have connected peers and still lack PDF, request again
+      if (this.activePeers.size > 0) {
+        this.requestPDFFromPeers();
+      }
+    }, 2500);
+  }
+
+  private stopPdfPolling() {
+    if (this.pdfPollTimer) {
+      clearInterval(this.pdfPollTimer);
+      this.pdfPollTimer = null;
+    }
   }
 
   private handleLocalDocUpdate = (update: Uint8Array, origin: any) => {
@@ -76,7 +117,7 @@ export class DocSyncEngine {
 
     const message: PeerMessage = {
       type: 'state-update',
-      payload: update,
+      payload: uint8ArrayToBase64(update),
     };
 
     for (const transport of this.transports) {
@@ -87,17 +128,31 @@ export class DocSyncEngine {
   /**
    * On EVERY peer join: Handshake step 1
    * Send local state vector to remote peer so they can send us whatever history we missed.
+   * Also, if we don't have the original PDF yet, immediately request it from this peer!
    */
-  private handlePeerJoin(transport: SyncTransport, peerId: string) {
+  private async handlePeerJoin(transport: SyncTransport, peerId: string) {
     if (this.destroyed) return;
     this.activePeers.add(peerId);
     this.notifyPeers();
 
+    // 1. Send our local state vector
     const localStateVector = Y.encodeStateVector(this.doc);
     transport.sendToPeer(peerId, {
       type: 'state-vector',
-      payload: localStateVector,
+      payload: uint8ArrayToBase64(localStateVector),
     });
+
+    // 2. Check if we need the PDF file from this newly joined peer
+    const hasLocal = Boolean(this.options.getLocalPdfBytes?.());
+    if (!hasLocal) {
+      const existsInDb = await hasOriginalPDF(this.documentId);
+      if (!existsInDb && !this.destroyed) {
+        transport.sendToPeer(peerId, {
+          type: 'request-pdf',
+          payload: { documentId: this.documentId },
+        });
+      }
+    }
   }
 
   private handlePeerLeave(peerId: string) {
@@ -114,39 +169,67 @@ export class DocSyncEngine {
     peerId: string,
     message: PeerMessage
   ) {
-    if (this.destroyed) return;
+    if (this.destroyed || !message || !message.type) return;
 
     switch (message.type) {
       case 'state-vector': {
         // Peer sent their state vector -> Send them the delta diff
-        const remoteVector = new Uint8Array(message.payload);
-        const update = Y.encodeStateAsUpdate(this.doc, remoteVector);
-        if (update.byteLength > 0) {
-          transport.sendToPeer(peerId, {
-            type: 'state-update',
-            payload: update,
-          });
+        const remoteVector = normalizeToUint8Array(message.payload);
+        if (remoteVector.byteLength > 0) {
+          const update = Y.encodeStateAsUpdate(this.doc, remoteVector);
+          if (update.byteLength > 0) {
+            transport.sendToPeer(peerId, {
+              type: 'state-update',
+              payload: uint8ArrayToBase64(update),
+            });
+          }
+        } else {
+          // If remote peer sent empty state vector, send full state
+          const fullUpdate = Y.encodeStateAsUpdate(this.doc);
+          if (fullUpdate.byteLength > 0) {
+            transport.sendToPeer(peerId, {
+              type: 'state-update',
+              payload: uint8ArrayToBase64(fullUpdate),
+            });
+          }
         }
         break;
       }
 
       case 'state-update': {
         // Apply remote update to our Y.Doc
-        const update = new Uint8Array(message.payload);
-        Y.applyUpdate(this.doc, update, 'p2p');
+        const update = normalizeToUint8Array(message.payload);
+        if (update.byteLength > 0) {
+          Y.applyUpdate(this.doc, update, 'p2p');
+        }
         break;
       }
 
       case 'request-pdf': {
         // Peer requested original PDF bytes
-        const pdfEntry = await getOriginalPDF(this.documentId);
-        if (pdfEntry && pdfEntry.bytes) {
-          const chunks = chunkPDF(this.documentId, pdfEntry.bytes);
-          for (const chunk of chunks) {
+        let bytes = this.options.getLocalPdfBytes?.() || null;
+        let filename = 'Document.pdf';
+
+        if (!bytes) {
+          const pdfEntry = await getOriginalPDF(this.documentId);
+          if (pdfEntry && pdfEntry.bytes) {
+            bytes = pdfEntry.bytes;
+            filename = pdfEntry.filename || filename;
+          }
+        }
+
+        if (bytes && bytes.byteLength > 0) {
+          const chunks = chunkPDF(this.documentId, bytes, filename);
+          for (let i = 0; i < chunks.length; i++) {
+            if (this.destroyed) break;
             transport.sendToPeer(peerId, {
               type: 'pdf-chunk',
-              payload: chunk,
+              payload: chunks[i],
             });
+            // Small pacing delay to avoid flooding WebRTC DataChannel
+            if (chunks.length > 2 && i % 4 === 0) {
+              await new Promise((r) => setTimeout(r, 6));
+            }
           }
         }
         break;
@@ -155,7 +238,7 @@ export class DocSyncEngine {
       case 'pdf-chunk': {
         // Received a PDF chunk from peer
         const chunk = message.payload as ChunkMessage;
-        if (chunk.documentId !== this.documentId) return;
+        if (!chunk || chunk.documentId !== this.documentId) return;
 
         if (!this.pdfReassembler) {
           this.pdfReassembler = new ChunkReassembler(this.documentId);
@@ -167,16 +250,19 @@ export class DocSyncEngine {
           chunk.data
         );
 
-        if (this.onPdfProgress) {
-          this.onPdfProgress(progress);
+        if (this.options.onPdfProgress) {
+          this.options.onPdfProgress(progress);
         }
 
         if (isComplete) {
           try {
             const assembledBytes = await this.pdfReassembler.assembleAndVerify();
-            await storeOriginalPDF(this.documentId, assembledBytes);
-            if (this.onPdfAvailable) {
-              this.onPdfAvailable(assembledBytes);
+            const filename = chunk.filename || 'Document.pdf';
+            await storeOriginalPDF(this.documentId, assembledBytes, filename);
+            this.stopPdfPolling();
+
+            if (this.options.onPdfAvailable) {
+              this.options.onPdfAvailable(assembledBytes, filename);
             }
           } catch (err) {
             console.error('Failed to assemble and verify PDF chunks:', err);
@@ -192,6 +278,7 @@ export class DocSyncEngine {
    * Request original PDF bytes from connected peers
    */
   public requestPDFFromPeers() {
+    if (this.destroyed) return;
     const msg: PeerMessage = {
       type: 'request-pdf',
       payload: { documentId: this.documentId },
@@ -202,8 +289,8 @@ export class DocSyncEngine {
   }
 
   private notifyPeers() {
-    if (this.onPeersChange) {
-      this.onPeersChange(this.activePeers.size);
+    if (this.options.onPeersChange) {
+      this.options.onPeersChange(this.activePeers.size);
     }
   }
 
@@ -213,6 +300,7 @@ export class DocSyncEngine {
 
   public destroy() {
     this.destroyed = true;
+    this.stopPdfPolling();
     this.doc.off('update', this.handleLocalDocUpdate);
     for (const transport of this.transports) {
       transport.disconnect();

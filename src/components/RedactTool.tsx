@@ -21,6 +21,7 @@ import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 import { useCRDTSync } from '../hooks/useCRDTSync';
+import { SyncWaitingCard } from './SyncWaitingCard';
 
 interface RedactToolProps {
   onDocumentProcessed: (doc: ProcessedDoc) => void;
@@ -176,6 +177,19 @@ export const RedactTool: React.FC<RedactToolProps> = ({
   };
 
   if (!rawPdfBytes) {
+    if (documentId) {
+      return (
+        <SyncWaitingCard
+          documentId={documentId}
+          peerCount={crdt.peerCount}
+          pdfProgress={crdt.pdfProgress}
+          syncStatus={crdt.syncStatus}
+          onRequestPdf={crdt.requestPdfFromPeers}
+          onUploadFile={onUploadFile}
+        />
+      );
+    }
+
     return (
       <div className="max-w-[1000px] mx-auto px-4 py-16 text-center">
         <div className="bg-white rounded-2xl border-2 border-dashed border-black/15 p-12 space-y-4">

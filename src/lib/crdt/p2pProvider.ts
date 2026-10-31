@@ -94,16 +94,18 @@ export async function createP2PProvider(
   documentId: string,
   existingDoc?: Y.Doc,
   callbacks?: {
+    getLocalPdfBytes?: () => Uint8Array | null;
     onStatusChange?: (status: SyncStatus) => void;
     onPeersChange?: (count: number) => void;
-    onPdfAvailable?: (bytes: Uint8Array) => void;
+    onPdfAvailable?: (bytes: Uint8Array, filename?: string) => void;
     onPdfProgress?: (progress: number) => void;
   }
 ): Promise<P2PProviderHandle> {
+  const cleanDocId = documentId.trim().toLowerCase();
   const doc = existingDoc || new Y.Doc();
 
   // 1. Offline persistence with y-indexeddb
-  const idbProvider = new IndexeddbPersistence(documentId, doc);
+  const idbProvider = new IndexeddbPersistence(cleanDocId, doc);
   callbacks?.onStatusChange?.('connecting');
 
   // Wait for indexeddb to load locally persisted state
@@ -126,8 +128,9 @@ export async function createP2PProvider(
   // 3. Start DocSyncEngine
   const engine = new DocSyncEngine({
     doc,
-    documentId,
+    documentId: cleanDocId,
     transports,
+    getLocalPdfBytes: callbacks?.getLocalPdfBytes,
     onPeersChange: (count) => {
       callbacks?.onPeersChange?.(count);
       callbacks?.onStatusChange?.(count > 0 ? 'synced' : 'offline');

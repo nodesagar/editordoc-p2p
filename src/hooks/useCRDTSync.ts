@@ -58,11 +58,24 @@ export function useCRDTSync(options: UseCRDTSyncOptions) {
 
   const providerHandleRef = useRef<P2PProviderHandle | null>(null);
   const docRef = useRef<Y.Doc | null>(null);
+  const rawPdfBytesRef = useRef<Uint8Array | null>(rawPdfBytes);
 
-  // Sync ref with state
+  // Sync refs with state
   useEffect(() => {
     docRef.current = doc;
   }, [doc]);
+
+  useEffect(() => {
+    rawPdfBytesRef.current = rawPdfBytes;
+  }, [rawPdfBytes]);
+
+  // Sync initialPdfBytes if passed later
+  useEffect(() => {
+    if (initialPdfBytes && !rawPdfBytes) {
+      setRawPdfBytes(initialPdfBytes);
+      rawPdfBytesRef.current = initialPdfBytes;
+    }
+  }, [initialPdfBytes, rawPdfBytes]);
 
   // Main lifecycle for joining a document room
   useEffect(() => {
@@ -71,12 +84,17 @@ export function useCRDTSync(options: UseCRDTSyncOptions) {
       setIsLoaded(false);
       setSyncStatus('offline');
       setPeerCount(0);
+      setRawPdfBytes(null);
+      setPdfProgress(null);
+      rawPdfBytesRef.current = null;
       return;
     }
 
+    const cleanDocId = documentId.trim().toLowerCase();
     let isCancelled = false;
     const ydoc = new Y.Doc();
     setDoc(ydoc);
+    setPdfProgress(null);
 
     // Deep observer callback to re-render UI whenever nested maps change
     const handleDeepChange = () => {
@@ -101,26 +119,39 @@ export function useCRDTSync(options: UseCRDTSyncOptions) {
     // Load or initialize
     (async () => {
       try {
-        // 1. Check local PDF bytes
-        const existingPdf = await getOriginalPDF(documentId);
+        // 1. Check local PDF bytes in IndexedDB
+        const existingPdf = await getOriginalPDF(cleanDocId);
         if (existingPdf && existingPdf.bytes) {
-          if (!isCancelled) setRawPdfBytes(existingPdf.bytes);
+          if (!isCancelled) {
+            setRawPdfBytes(existingPdf.bytes);
+            rawPdfBytesRef.current = existingPdf.bytes;
+          }
         } else if (initialPdfBytes) {
-          await storeOriginalPDF(documentId, initialPdfBytes, initialTitle);
-          if (!isCancelled) setRawPdfBytes(initialPdfBytes);
+          await storeOriginalPDF(cleanDocId, initialPdfBytes, initialTitle);
+          if (!isCancelled) {
+            setRawPdfBytes(initialPdfBytes);
+            rawPdfBytesRef.current = initialPdfBytes;
+          }
+        } else {
+          if (!isCancelled) {
+            setRawPdfBytes(null);
+            rawPdfBytesRef.current = null;
+          }
         }
 
         // 2. Connect P2P and IndexedDB persistence
-        const handle = await createP2PProvider(documentId, ydoc, {
+        const handle = await createP2PProvider(cleanDocId, ydoc, {
+          getLocalPdfBytes: () => rawPdfBytesRef.current,
           onStatusChange: (status) => {
             if (!isCancelled) setSyncStatus(status);
           },
           onPeersChange: (count) => {
             if (!isCancelled) setPeerCount(count);
           },
-          onPdfAvailable: (bytes) => {
+          onPdfAvailable: (bytes, filename) => {
             if (!isCancelled) {
               setRawPdfBytes(bytes);
+              rawPdfBytesRef.current = bytes;
               setPdfProgress(null);
             }
           },
@@ -138,10 +169,10 @@ export function useCRDTSync(options: UseCRDTSyncOptions) {
 
         // 3. If doc has no pages yet and pageCount is provided, initialize
         if (pageCount && pageCount > 0) {
-          initializeDocument(ydoc, documentId, initialTitle || 'Document.pdf', pageCount);
+          initializeDocument(ydoc, cleanDocId, initialTitle || 'Document.pdf', pageCount);
         }
 
-        // 4. If we still don't have the PDF bytes, request them from peers
+        // 4. Request PDF bytes from peers if missing locally
         if (!existingPdf && !initialPdfBytes) {
           handle.engine.requestPDFFromPeers();
         }
@@ -290,6 +321,10 @@ export function useCRDTSync(options: UseCRDTSyncOptions) {
     [documentId]
   );
 
+  const requestPdfFromPeers = useCallback(() => {
+    providerHandleRef.current?.engine.requestPDFFromPeers();
+  }, []);
+
   return {
     doc,
     documentId,
@@ -305,6 +340,7 @@ export function useCRDTSync(options: UseCRDTSyncOptions) {
     rawPdfBytes,
     pdfProgress,
     isLoaded,
+    requestPdfFromPeers,
     // Mutations
     addTextOverlay,
     updateTextOverlay,

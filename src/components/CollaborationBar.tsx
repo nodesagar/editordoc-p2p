@@ -22,7 +22,7 @@ export const CollaborationBar: React.FC<CollaborationBarProps> = ({
 
   if (!documentId) {
     return (
-      <div className="flex items-center space-x-2 text-xs text-[#5f6368] px-3 py-1 bg-black/[0.03] rounded-full">
+      <div className="flex items-center space-x-1.5 text-xs text-[#5f6368] px-3 py-1 bg-black/[0.03] border border-black/5 rounded-full h-[34px]">
         <FolderSync className="w-3.5 h-3.5" />
         <span>No active document</span>
       </div>
@@ -48,9 +48,9 @@ export const CollaborationBar: React.FC<CollaborationBarProps> = ({
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-2 text-xs bg-white/80 backdrop-blur border border-black/10 rounded-xl px-3 py-1.5 shadow-2xs">
+    <div className="flex items-center flex-nowrap space-x-2 text-xs bg-white/90 backdrop-blur border border-black/10 rounded-xl px-2.5 py-1 shadow-2xs h-[34px] shrink-0">
       {/* Sync / P2P Status Indicator */}
-      <div className="flex items-center space-x-1.5 font-medium">
+      <div className="flex items-center space-x-1.5 font-medium shrink-0">
         {peerCount > 0 ? (
           <span className="flex items-center space-x-1 text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
             <span className="relative flex h-2 w-2">
@@ -68,13 +68,13 @@ export const CollaborationBar: React.FC<CollaborationBarProps> = ({
         )}
       </div>
 
-      <div className="h-3.5 w-px bg-black/10 hidden sm:block" />
+      <div className="h-3.5 w-px bg-black/10 shrink-0" />
 
       {/* Room ID & Share */}
-      <div className="flex items-center space-x-1">
+      <div className="flex items-center space-x-1 shrink-0">
         <button
           onClick={handleCopyLink}
-          className="flex items-center space-x-1 text-[#414753] hover:text-[#005db2] bg-black/[0.04] hover:bg-[#005db2]/10 px-2 py-1 rounded-md transition-colors"
+          className="flex items-center space-x-1 text-[#414753] hover:text-[#005db2] bg-black/[0.04] hover:bg-[#005db2]/10 px-2 py-0.5 rounded-md transition-colors"
           title={`Document Room ID: ${documentId}\nClick to copy collaboration link`}
         >
           <Share2 className="w-3 h-3 text-[#005db2]" />
@@ -83,13 +83,13 @@ export const CollaborationBar: React.FC<CollaborationBarProps> = ({
         </button>
       </div>
 
-      <div className="h-3.5 w-px bg-black/10 hidden sm:block" />
+      <div className="h-3.5 w-px bg-black/10 shrink-0 hidden sm:block" />
 
       {/* Offline Store-and-Forward CDS buttons */}
-      <div className="flex items-center space-x-1">
+      <div className="flex items-center space-x-1 shrink-0">
         <button
           onClick={onExportSync}
-          className="flex items-center space-x-1 text-[#414753] hover:text-[#1a1c1c] hover:bg-black/[0.05] px-2 py-1 rounded-md transition-colors"
+          className="flex items-center space-x-1 text-[#414753] hover:text-[#1a1c1c] hover:bg-black/[0.05] px-2 py-0.5 rounded-md transition-colors"
           title="Export current CRDT state as .cdsync file for air-gapped / offline sync"
         >
           <Download className="w-3 h-3 text-black/60" />
@@ -98,7 +98,7 @@ export const CollaborationBar: React.FC<CollaborationBarProps> = ({
 
         <button
           onClick={() => fileInputRef.current?.click()}
-          className="flex items-center space-x-1 text-[#414753] hover:text-[#1a1c1c] hover:bg-black/[0.05] px-2 py-1 rounded-md transition-colors"
+          className="flex items-center space-x-1 text-[#414753] hover:text-[#1a1c1c] hover:bg-black/[0.05] px-2 py-0.5 rounded-md transition-colors"
           title="Import .cdsync file to apply offline peer updates"
         >
           <Upload className="w-3 h-3 text-black/60" />
