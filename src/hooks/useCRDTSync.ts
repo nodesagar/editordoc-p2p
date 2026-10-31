@@ -148,7 +148,7 @@ export function useCRDTSync(options: UseCRDTSyncOptions) {
           onPeersChange: (count) => {
             if (!isCancelled) setPeerCount(count);
           },
-          onPdfAvailable: (bytes, filename) => {
+          onPdfAvailable: (bytes: Uint8Array, _filename?: string) => {
             if (!isCancelled) {
               setRawPdfBytes(bytes);
               rawPdfBytesRef.current = bytes;

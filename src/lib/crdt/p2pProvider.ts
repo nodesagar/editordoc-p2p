@@ -4,6 +4,27 @@ import { joinRoom } from 'trystero/torrent';
 import { SyncTransport, PeerMessage, DocSyncEngine, BroadcastChannelTransport } from './docSync';
 import { SyncStatus } from '../../types';
 
+// High-availability public WebTorrent trackers verified for WebRTC browser signaling
+const RELIABLE_TRACKERS = [
+  'wss://tracker.openwebtorrent.com',
+  'wss://tracker.webtorrent.dev',
+  'wss://tracker.novage.com.ua',
+  'wss://tracker.files.fm:7073/announce',
+];
+
+// Multi-provider STUN configuration for symmetric and restricted NAT traversal
+const RTC_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ],
+};
+
 export class TrysteroTransport implements SyncTransport {
   public readonly name = 'Trystero-WebRTC';
   private room: any = null;
@@ -19,7 +40,15 @@ export class TrysteroTransport implements SyncTransport {
 
   connect(roomId: string): void {
     try {
-      this.room = joinRoom({ appId: this.appId }, roomId);
+      this.room = joinRoom(
+        {
+          appId: this.appId,
+          relayUrls: RELIABLE_TRACKERS,
+          rtcConfig: RTC_CONFIG,
+          relayRedundancy: 4,
+        },
+        roomId
+      );
 
       const [send, receive] = this.room.makeAction('sync_action');
       this.sendAction = send;
@@ -101,11 +130,10 @@ export async function createP2PProvider(
     onPdfProgress?: (progress: number) => void;
   }
 ): Promise<P2PProviderHandle> {
-  const cleanDocId = documentId.trim().toLowerCase();
   const doc = existingDoc || new Y.Doc();
 
   // 1. Offline persistence with y-indexeddb
-  const idbProvider = new IndexeddbPersistence(cleanDocId, doc);
+  const idbProvider = new IndexeddbPersistence(documentId, doc);
   callbacks?.onStatusChange?.('connecting');
 
   // Wait for indexeddb to load locally persisted state
@@ -128,9 +156,8 @@ export async function createP2PProvider(
   // 3. Start DocSyncEngine
   const engine = new DocSyncEngine({
     doc,
-    documentId: cleanDocId,
+    documentId,
     transports,
-    getLocalPdfBytes: callbacks?.getLocalPdfBytes,
     onPeersChange: (count) => {
       callbacks?.onPeersChange?.(count);
       callbacks?.onStatusChange?.(count > 0 ? 'synced' : 'offline');

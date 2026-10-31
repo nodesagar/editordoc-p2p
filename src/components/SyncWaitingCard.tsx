@@ -11,6 +11,8 @@ import {
   FileText,
   Loader2,
   ArrowLeft,
+  Info,
+  FolderSync,
 } from 'lucide-react';
 
 interface SyncWaitingCardProps {
@@ -20,6 +22,7 @@ interface SyncWaitingCardProps {
   syncStatus?: string;
   onRequestPdf?: () => void;
   onUploadFile?: (file: File) => void;
+  onImportSync?: (file: File) => void;
   onReturnToDashboard?: () => void;
 }
 
@@ -29,15 +32,21 @@ export const SyncWaitingCard: React.FC<SyncWaitingCardProps> = ({
   pdfProgress,
   onRequestPdf,
   onUploadFile,
+  onImportSync,
   onReturnToDashboard,
 }) => {
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedId, setCopiedId] = useState(false);
   const [isRequesting, setIsRequesting] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const syncFileInputRef = React.useRef<HTMLInputElement>(null);
 
   const cleanId = documentId.trim().toLowerCase();
   const shortId = `${cleanId.slice(0, 8)}...${cleanId.slice(-6)}`;
+
+  const isLocalhost =
+    typeof window !== 'undefined' &&
+    (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
   const handleCopyLink = () => {
     try {
@@ -71,6 +80,14 @@ export const SyncWaitingCard: React.FC<SyncWaitingCardProps> = ({
     const file = e.target.files?.[0];
     if (file && onUploadFile) {
       onUploadFile(file);
+      e.target.value = '';
+    }
+  };
+
+  const handleSyncFilePicked = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && onImportSync) {
+      onImportSync(file);
       e.target.value = '';
     }
   };
@@ -132,6 +149,23 @@ export const SyncWaitingCard: React.FC<SyncWaitingCardProps> = ({
           </p>
         </div>
 
+        {/* Troubleshooting / Explanation Card when peerCount === 0 */}
+        {peerCount === 0 && (
+          <div className="bg-amber-50 border border-amber-200/80 rounded-xl p-3.5 text-left text-xs text-amber-900 space-y-2">
+            <div className="font-semibold flex items-center space-x-1.5 text-amber-950">
+              <Info className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>Why is peer discovery waiting?</span>
+            </div>
+            <ul className="list-disc list-inside space-y-1 text-amber-800 text-[11px] leading-relaxed">
+              <li><strong>Host must be active:</strong> The host who uploaded this document must have EditorDoc open in their browser.</li>
+              {isLocalhost && (
+                <li><strong>Testing between 2 devices?</strong> <code className="bg-amber-100 px-1 py-0.5 rounded text-amber-900 font-mono">localhost</code> only works on this computer. Use your Wi-Fi IP address (e.g. <code className="bg-amber-100 px-1 py-0.5 rounded text-amber-900 font-mono">http://192.168.x.x:3000/?doc=...</code>) or test with another browser window on this machine.</li>
+              )}
+              <li><strong>Ad-blockers / Firewall:</strong> Brave Shields or ad-blockers can block WebTorrent/WebRTC trackers. Try pausing them or test on the same network.</li>
+            </ul>
+          </div>
+        )}
+
         {/* Progress Bar (Visible during chunk transfer) */}
         {isTransferring && (
           <div className="max-w-md mx-auto space-y-2">
@@ -177,12 +211,12 @@ export const SyncWaitingCard: React.FC<SyncWaitingCardProps> = ({
           </div>
         </div>
 
-        {/* Action Controls */}
-        <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
+        {/* Action Controls & Instant Fallbacks */}
+        <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
           <button
             onClick={handleManualRequest}
             disabled={isRequesting}
-            className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 bg-[#005db2] hover:bg-[#004a8f] text-white text-xs font-semibold px-4 py-2.5 rounded-xl shadow-2xs transition-all cursor-pointer disabled:opacity-50"
+            className="inline-flex items-center justify-center space-x-2 bg-[#005db2] hover:bg-[#004a8f] text-white text-xs font-semibold px-4 py-2.5 rounded-xl shadow-2xs transition-all cursor-pointer disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isRequesting ? 'animate-spin' : ''}`} />
             <span>{isRequesting ? 'Requesting...' : 'Request PDF from Peers'}</span>
@@ -192,7 +226,7 @@ export const SyncWaitingCard: React.FC<SyncWaitingCardProps> = ({
             <>
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 bg-white hover:bg-black/5 text-[#1a1c1c] border border-black/15 text-xs font-semibold px-4 py-2.5 rounded-xl shadow-2xs transition-colors cursor-pointer"
+                className="inline-flex items-center justify-center space-x-2 bg-white hover:bg-black/5 text-[#1a1c1c] border border-black/15 text-xs font-semibold px-4 py-2.5 rounded-xl shadow-2xs transition-colors cursor-pointer"
                 title="If you already have this PDF file locally, upload it to match the room ID immediately"
               >
                 <Upload className="w-3.5 h-3.5 text-emerald-600" />
@@ -208,10 +242,30 @@ export const SyncWaitingCard: React.FC<SyncWaitingCardProps> = ({
             </>
           )}
 
+          {onImportSync && (
+            <>
+              <button
+                onClick={() => syncFileInputRef.current?.click()}
+                className="inline-flex items-center justify-center space-x-2 bg-white hover:bg-black/5 text-[#1a1c1c] border border-black/15 text-xs font-semibold px-4 py-2.5 rounded-xl shadow-2xs transition-colors cursor-pointer"
+                title="Import .cdsync file if direct WebRTC cannot connect"
+              >
+                <FolderSync className="w-3.5 h-3.5 text-[#005db2]" />
+                <span>Import .cdsync File</span>
+              </button>
+              <input
+                type="file"
+                ref={syncFileInputRef}
+                onChange={handleSyncFilePicked}
+                accept=".cdsync,application/x-cdsync,application/json"
+                className="hidden"
+              />
+            </>
+          )}
+
           {onReturnToDashboard && (
             <button
               onClick={onReturnToDashboard}
-              className="w-full sm:w-auto inline-flex items-center justify-center space-x-1 text-xs text-[#5f6368] hover:text-[#1a1c1c] px-3 py-2 rounded-xl transition-colors cursor-pointer"
+              className="inline-flex items-center justify-center space-x-1 text-xs text-[#5f6368] hover:text-[#1a1c1c] px-3 py-2 rounded-xl transition-colors cursor-pointer"
             >
               <ArrowLeft className="w-3.5 h-3.5 mr-1" />
               <span>Dashboard</span>

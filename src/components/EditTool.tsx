@@ -323,6 +323,7 @@ export const EditTool: React.FC<EditToolProps> = ({
           syncStatus={crdt.syncStatus}
           onRequestPdf={crdt.requestPdfFromPeers}
           onUploadFile={onUploadFile}
+          onImportSync={crdt.importSync}
         />
       );
     }
